@@ -138,7 +138,7 @@ def get_marks(valid: bool = Depends(validate)):
 
 
 @app.post("/mark")
-def save_mark(item: Flagged, valid: bool = Depends(validate)):
+def save_mark(item: Flagged):
     data = item.dict()
     if client:
         doc_id, doc_rev = db.save(data)
@@ -146,7 +146,7 @@ def save_mark(item: Flagged, valid: bool = Depends(validate)):
 
 
 @app.put("/mark/{_id}")
-def update_mark(_id: str, item: Flagged, valid: bool = Depends(validate)):
+def update_mark(_id: str, item: Flagged):
     doc = db[_id]
     doc["category"] = item.category
     db[doc.id] = doc
@@ -155,7 +155,7 @@ def update_mark(_id: str, item: Flagged, valid: bool = Depends(validate)):
 
 
 @app.delete("/mark")
-def delete_mark(_id: str, valid: bool = Depends(validate)):
+def delete_mark(_id: str = None, valid: bool = Depends(validate)):
     my_document = db[_id]
     my_document.delete()
     return {"status": "success"}
