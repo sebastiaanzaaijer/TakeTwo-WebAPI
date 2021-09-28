@@ -6,7 +6,7 @@ import json
 
 from typing import Optional
 
-from fastapi import FastAPI, Depends, FastAPI, HTTPException
+from fastapi import FastAPI, Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel
 
 from fastapi.responses import HTMLResponse
@@ -18,7 +18,14 @@ import base64
 import couchdb
 
 import jwt
+from passlib.context import CryptContext
+from jwt import PyJWTError
 
+from datetime import timedelta,datetime
+
+SECRET_KEY = "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7" #TODO change and move to .env
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 clear_token = os.getenv("CLEAR_TOKEN")
 db_name = os.getenv("DB_NAME")
@@ -35,6 +42,63 @@ app = FastAPI()
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
+
+fake_users_db = {
+    "johndoe": {
+        "username": "johndoe",
+        "full_name": "John Doe",
+        "email": "johndoe@example.com",
+        "hashed_password": "$2b$12$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36WQoeG6Lruj3vjPGga31lW",
+        "disabled": False,
+    }
+}
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    username: Optional[str] = None
+
+class User(BaseModel):
+    username: str
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    disabled: Optional[bool] = None
+
+
+class UserInDB(User):
+    hashed_password: str
+
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
+
+app = FastAPI()
+
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
+
+
+def get_user(db, username: str):
+    if username in db:
+        user_dict = db[username]
+        return UserInDB(**user_dict)
+
+def authenticate_user(fake_db, username: str, password: str):
+    user = get_user(fake_db, username)
+    if not user:
+        return False
+    if not verify_password(password, user.hashed_password):
+        return False
+    return user
 
 def retrieve_token(username, password):
 
@@ -62,15 +126,42 @@ def retrieve_token(username, password):
         raise HTTPException(status_code=response.status_code, detail=response.text)
 
 
-
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
 
 def validate(token: str = Depends(oauth2_scheme)):
-    res = validate_token_IBM(
+    if os.getenv("AUTH_PROVIDER") == "AppID":
+        return validate_token_IBM(
         token, os.getenv("OAUTH_SERVER_URL"), os.getenv("CLIENT_ID"), os.getenv("SECRET")
     )
-    return res
+    return validate_token_local(token)
 
-
+def validate_token_local(token, str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+        token_data = TokenData(username=username)
+    except PyJWTError:
+        raise credentials_exception
+    user = get_user(fake_users_db, username=token_data.username)
+    if user is None:
+        raise credentials_exception
+    return user
+    
 def validate_token_IBM(token, authURL, clientId, clientSecret=Depends(oauth2_scheme)):
     usrPass = clientId + ":" + clientSecret
     b64Val = base64.b64encode(usrPass.encode()).decode()
@@ -124,18 +215,30 @@ def read_root():
 # Get auth token
 @app.post("/token")
 def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    """
-    Gets a token from IBM APP ID, given a username and a password. Depends on OAuth2PasswordRequestForm.
-    Parameters
-    ----------
-    OAuth2PasswordRequestForm.form_data.username: str, required
-    OAuth2PasswordRequestForm.form_data.password: str, required
-    Returns
-    -------
-    token: str
-    """
-    # print(retrieve_token(form_data.username,form_data.password))
-    return retrieve_token(form_data.username, form_data.password)
+    if os.getenv("AUTH_PROVIDER") == "AppID":
+        """
+        Gets a token from IBM APP ID, given a username and a password. Depends on OAuth2PasswordRequestForm.
+        Parameters
+        ----------
+        OAuth2PasswordRequestForm.form_data.username: str, required
+        OAuth2PasswordRequestForm.form_data.password: str, required
+        Returns
+        -------
+        token: str
+        """
+        return retrieve_token(form_data.username, form_data.password)
+    user = authenticate_user(fake_users_db, form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.username}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
 
 
 @app.get("/mark")
